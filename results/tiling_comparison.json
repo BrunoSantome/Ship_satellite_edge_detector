@@ -1,0 +1,52 @@
+{
+  "frame_images": [
+    "d20b410aa.jpg",
+    "9db607768.jpg",
+    "7ca846267.jpg",
+    "469e803eb.jpg",
+    "257b0cea8.jpg",
+    "3df5be7df.jpg",
+    "1002842bf.jpg",
+    "08238e53e.jpg",
+    "03d075610.jpg"
+  ],
+  "gt_ships": 28,
+  "tile": 768,
+  "overlap": 256,
+  "conf": 0.25,
+  "device": "CPU",
+  "results": [
+    {
+      "method": "tiled",
+      "model_runs": 16,
+      "seconds": 7.1,
+      "detections": 30,
+      "TP": 25,
+      "FP": 5,
+      "FN": 3,
+      "recall": 0.893,
+      "precision": 0.833,
+      "recall_by_ship_size": {
+        "0-20px": "11/13",
+        "20-50px": "1/2",
+        "50-10000px": "13/13"
+      }
+    },
+    {
+      "method": "resized",
+      "model_runs": 1,
+      "seconds": 0.4,
+      "detections": 17,
+      "TP": 14,
+      "FP": 3,
+      "FN": 14,
+      "recall": 0.5,
+      "precision": 0.824,
+      "recall_by_ship_size": {
+        "0-20px": "1/13",
+        "20-50px": "1/2",
+        "50-10000px": "12/13"
+      }
+    }
+  ]
+}
