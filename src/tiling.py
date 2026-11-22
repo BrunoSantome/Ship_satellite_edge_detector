@@ -12,6 +12,7 @@ same input, scored against the known ground-truth boxes.
 
 Run:
   python src/tiling.py              # uses models/best.pt and data/val_test_subset/test
+  python src/tiling.py --frames 10  # totals over 10 frames built from disjoint test images
   python src/tiling.py --selftest   # checks tiling + NMS logic, no model or images needed
 """
 import argparse
@@ -81,10 +82,10 @@ def load_gt(label_path, w, h):
     return np.array(rows, dtype=np.float32).reshape(-1, 4)
 
 
-def build_frame(split_dir, seed=0):
-    """Stitch GRID x GRID random test images into one frame; shift their GT boxes accordingly."""
-    images = sorted((split_dir / "images").glob("*.jpg"))
-    rng = np.random.default_rng(seed)
+def build_frame(split_dir, rng, used=frozenset()):
+    """Stitch GRID x GRID random test images into one frame; shift their GT boxes accordingly.
+    `used` = images placed in earlier frames, excluded so no ship is counted twice across frames."""
+    images = [p for p in sorted((split_dir / "images").glob("*.jpg")) if p.name not in used]
     # Random but not cherry-picked: redraw until enough images contain ships
     while True:
         picks = rng.choice(len(images), GRID * GRID, replace=False)
@@ -157,7 +158,7 @@ def summarise(name, pred, scores, gt, seconds, n_tiles):
     by_size = {}
     for lo, hi in SIZE_BUCKETS:
         in_bucket = (long_side >= lo) & (long_side < hi)
-        by_size[f"{lo}-{hi}px"] = f"{int(matched[in_bucket].sum())}/{int(in_bucket.sum())}"
+        by_size[f"{lo}-{hi}px"] = [int(matched[in_bucket].sum()), int(in_bucket.sum())]  # [found, total]
     return {
         "method": name, "model_runs": n_tiles, "seconds": round(seconds, 2),
         "detections": len(pred), "TP": int(tp.sum()), "FP": int((~tp).sum()), "FN": int((~matched).sum()),
@@ -165,6 +166,19 @@ def summarise(name, pred, scores, gt, seconds, n_tiles):
         "precision": round(float(tp.mean()), 3) if len(pred) else None,
         "recall_by_ship_size": by_size,
     }, tp, matched
+
+
+def combine(summaries):
+    """Sum counts over several frames and recompute recall/precision from the totals."""
+    tot = {"method": summaries[0]["method"], "frames": len(summaries)}
+    for k in ["model_runs", "seconds", "detections", "TP", "FP", "FN"]:
+        tot[k] = round(sum(s[k] for s in summaries), 2)
+    tot["recall"] = round(tot["TP"] / max(1, tot["TP"] + tot["FN"]), 3)  # TP + FN = all GT ships
+    tot["precision"] = round(tot["TP"] / max(1, tot["TP"] + tot["FP"]), 3)
+    buckets = summaries[0]["recall_by_ship_size"]
+    tot["recall_by_ship_size"] = {b: [sum(s["recall_by_ship_size"][b][i] for s in summaries) for i in (0, 1)]
+                                  for b in buckets}
+    return tot
 
 
 def draw(frame, pred, tp, gt, matched, title):
@@ -185,28 +199,37 @@ def main(args):
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    frame, gt, names = build_frame(Path(args.data), seed=args.seed)
-    print(f"frame {frame.shape[1]}x{frame.shape[0]} from {names}, {len(gt)} ground-truth ships")
-    cv2.imwrite(str(out / "frame_input.jpg"), frame)
-
     model = YOLO(args.weights)
-    detect(model, frame[:TILE, :TILE])  # warm-up: first call loads/initialises, would distort timing
+    rng = np.random.default_rng(args.seed)
+    used, frames_info = set(), []
+    per_frame = {"tiled": [], "resized": []}
 
-    results = []
-    for name, fn in [("tiled", detect_tiled), ("resized", detect_resized)]:
-        t0 = time.perf_counter()
-        pred, scores, n_tiles = fn(model, frame)
-        seconds = time.perf_counter() - t0
-        summary, tp, matched = summarise(name, pred, scores, gt, seconds, n_tiles)
-        results.append(summary)
-        title = f"{name}: {summary['TP']}/{len(gt)} ships found, {summary['FP']} false alarms"
-        cv2.imwrite(str(out / f"frame_{name}.jpg"), draw(frame, pred, tp, gt, matched, title))
+    for k in range(args.frames):
+        frame, gt, names = build_frame(Path(args.data), rng, used)
+        used.update(names)
+        frames_info.append({"images": names, "gt_ships": len(gt)})
+        if k == 0:
+            cv2.imwrite(str(out / "frame_input.jpg"), frame)
+            detect(model, frame[:TILE, :TILE])  # warm-up: first call initialises, would distort timing
 
-    for r in results:
-        print(json.dumps(r))
+        for name, fn in [("tiled", detect_tiled), ("resized", detect_resized)]:
+            t0 = time.perf_counter()
+            pred, scores, n_tiles = fn(model, frame)
+            seconds = time.perf_counter() - t0
+            summary, tp, matched = summarise(name, pred, scores, gt, seconds, n_tiles)
+            per_frame[name].append(summary)
+            if k == 0:  # images only for the first frame; the rest only feed the totals
+                title = f"{name}: {summary['TP']}/{len(gt)} ships found, {summary['FP']} false alarms"
+                cv2.imwrite(str(out / f"frame_{name}.jpg"), draw(frame, pred, tp, gt, matched, title))
+        print(f"frame {k}: {len(gt)} ships | tiled TP {per_frame['tiled'][-1]['TP']} "
+              f"| resized TP {per_frame['resized'][-1]['TP']}")
+
+    totals = [combine(per_frame[name]) for name in per_frame]
+    for t in totals:
+        print(json.dumps(t))
     (out / "tiling_comparison.json").write_text(json.dumps(
-        {"frame_images": names, "gt_ships": len(gt), "tile": TILE, "overlap": OVERLAP, "conf": CONF,
-         "device": "CPU", "results": results}, indent=2))
+        {"tile": TILE, "overlap": OVERLAP, "conf": CONF, "device": "CPU", "frames": frames_info,
+         "totals": totals, "per_frame": per_frame}, indent=2))
     print(f"saved to {out}/")
 
 
@@ -246,6 +269,7 @@ if __name__ == "__main__":
     p.add_argument("--data", default="data/val_test_subset/test")
     p.add_argument("--out", default="results")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--frames", type=int, default=1, help="number of frames, each from unused test images")
     p.add_argument("--selftest", action="store_true")
     args = p.parse_args()
     selftest() if args.selftest else main(args)
