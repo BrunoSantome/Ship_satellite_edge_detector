@@ -20,6 +20,7 @@ import argparse
 import binascii
 import struct
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import cv2
@@ -76,6 +77,17 @@ def decode(packet):
     return {"frame_id": frame_id, "timestamp": timestamp, "detections": dets}
 
 
+def print_alert(msg):
+    """Ground operator's view: only what arrived over the link, no image."""
+    t = datetime.fromtimestamp(msg["timestamp"], timezone.utc)
+    print(f"    ALERT frame {msg['frame_id']} | {t:%Y-%m-%d %H:%M:%S} UTC | {len(msg['detections'])} detections")
+    print("     #   centre x, y (px)   size w x h (px)   confidence")
+    for i, d in enumerate(msg["detections"]):
+        x0, y0, x1, y1 = d["box"]
+        print(f"    {i:>2}   {(x0 + x1) / 2:>6.0f}, {(y0 + y1) / 2:<6.0f}      "
+              f"{x1 - x0:>4.0f} x {y1 - y0:<4.0f}       {d['conf']:.2f}")
+
+
 def fmt_time(seconds):
     if seconds < 60:
         return f"{seconds:.2f} s"
@@ -100,6 +112,7 @@ def main(args):
 
     # --- ground side: decode and check the round trip
     msg = decode(packet)
+    print_alert(msg)
     dec_boxes = np.array([d["box"] for d in msg["detections"]]).reshape(-1, 4)
     dec_conf = np.array([d["conf"] for d in msg["detections"]])
     if len(boxes):
